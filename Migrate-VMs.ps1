@@ -11,6 +11,17 @@
 #     - No longer assumes VM VHDs exist in the same storage account in the source subscription                                     #
 #     - Added ability to specify the datacentre location for the destination storage account                                       #
 #                                                                                                                                  #
+# ******************************************************************************************************************************** #
+# ***                                                                                                                          *** #
+# ***                                                      WARNING                                                             *** #
+# ***                                                                                                                          *** #
+# *** This script deletes things! I take no responsibility if you run it without understanding what it does and why it does it *** #
+# ***                                                                                                                          *** #
+# ***                                                                                                                          *** #
+# ***                                                                                                                          *** #
+# ***                                                                                                                          *** #
+# ******************************************************************************************************************************** #
+#                                                                                                                                  #
 # This script assumes                                                                                                              #
 #     - Azure PowerShell version 0.8.14                                                                                            #
 #     - Full admin control of the source and destination subscriptions already exists (publish settings files have been imported)  #
