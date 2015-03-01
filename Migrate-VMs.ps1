@@ -1,15 +1,8 @@
 ﻿####################################################################################################################################
 #                                                                                                                                  #
-#                                                 Migrate-VMs.ps1 Version 1.5                                                      #
+#                                                 Migrate-VMs.ps1 Version 1.6                                                      #
 #                                                                                                                                  #
 # Authored by: Mark Renoden - markreno@microsoft.com                                                                               #
-#                                                                                                                                  #
-# Version 1.5 updates - March 1st 2015                                                                                             #
-#     - Added handling for cases where the VM is not attached to a defined VNet                                                    #
-#     - Added handling for cases where the VM participates in an internal load balancer                                            #
-#     - Utilizes Export-AzureVM writing serialized VM configuration to the output folder                                           #
-#     - No longer assumes VM VHDs exist in the same storage account in the source subscription                                     #
-#     - Added ability to specify the datacentre location for the destination storage account                                       #
 #                                                                                                                                  #
 # ******************************************************************************************************************************** #
 # ***                                                                                                                          *** #
@@ -21,6 +14,17 @@
 # ***                                                                                                                          *** #
 # ***                                                                                                                          *** #
 # ******************************************************************************************************************************** #
+#                                                                                                                                  #
+# Version 1.6 updates - March 2nd 2015                                                                                             #
+#     - Added handling for cases where cloud services are using affinity groups instead of locations or vnets                      #
+#     - Script now creates the output directory it doesn't already exist                                                           #
+#                                                                                                                                  #
+# Version 1.5 updates - March 1st 2015                                                                                             #
+#     - Added handling for cases where the VM is not attached to a defined VNet                                                    #
+#     - Added handling for cases where the VM participates in an internal load balancer                                            #
+#     - Utilizes Export-AzureVM writing serialized VM configuration to the output folder                                           #
+#     - No longer assumes VM VHDs exist in the same storage account in the source subscription                                     #
+#     - Added ability to specify the datacentre location for the destination storage account                                       #
 #                                                                                                                                  #
 # This script assumes                                                                                                              #
 #     - Azure PowerShell version 0.8.14                                                                                            #
@@ -48,6 +52,10 @@
 $outputDir = '<OUTPUT DIRECTORY FOR CAPTURED VM CONFIGURATION>'                                       ####### EDIT THIS!!!!! #######
 Write-Host
 Write-Host 'Output directory is ' -ForegroundColor Green -NoNewline;Write-Host $outputDir -ForegroundColor Cyan
+If (!(Test-Path -Path $outputDir))
+{
+    New-Item -Path $outputDir -ItemType Directory
+}
 
 #Define source subscription
 $sourceSubscriptionName = '<SUBSCRIPTION NAME WHERE VMs CURRENTLY RESIDE>'                            ####### EDIT THIS!!!!! #######
@@ -106,12 +114,17 @@ foreach ($vm in $vms)
     Export-AzureVM -ServiceName $vm.ServiceName -Name $vm.Name -Path $exportPath | Out-Null
     
     #Build object that will store VM information
-    $info = "" | Select-Object ExportPath, ServiceName, ServiceLocation, InternalLoadBalancers, ReservedIPAddressName, ReservedIPAddressLabel, ReservedIPAddressLocation, VNet, OSDisk, DataDisks
+    $info = "" | Select-Object ExportPath, ServiceName, ServiceLocation, ServiceAffinityGroup, ServiceAffinityGroupLocation, InternalLoadBalancers, ReservedIPAddressName, ReservedIPAddressLabel, ReservedIPAddressLocation, VNet, OSDisk, DataDisks
 
     #Populate VM information
     $info.ExportPath = $exportPath
     $info.ServiceName = $vm.ServiceName
     $info.ServiceLocation = (Get-AzureService -ServiceName $vm.ServiceName).Location
+    $info.ServiceAffinityGroup = (Get-AzureService -ServiceName $vm.ServiceName).AffinityGroup
+    If ($info.ServiceAffinityGroup)
+    {
+        $info.ServiceAffinityGroupLocation = (Get-AzureAffinityGroup -Name $info.ServiceAffinityGroup).Location
+    }
     $info.InternalLoadBalancers = (Get-AzureInternalLoadBalancer -ServiceName $vm.ServiceName)
     $rIP = (Get-AzureReservedIP | where {$_.ServiceName -eq $vm.ServiceName})
     If ($rIP)
@@ -171,6 +184,8 @@ foreach ($vm in $vms)
     Remove-AzureVM -Name $vm.Name -ServiceName $vm.ServiceName
 }
 
+Start-Sleep -Seconds 30
+
 #Delete Cloud Services
 Write-Host
 Write-Host 'Deleting Cloud Services' -ForegroundColor Green
@@ -179,6 +194,17 @@ foreach ($vm in $vmInfo)
     If (Get-AzureService -ServiceName $vm.ServiceName -ErrorAction SilentlyContinue)
     {
         Remove-AzureService -ServiceName $vm.ServiceName -Force
+    }
+}
+
+#Delete Affinity Groups
+Write-Host
+Write-Host 'Deleting Affinity Groups' -ForegroundColor Green
+foreach ($vm in $vmInfo)
+{
+    If ($vm.ServiceAffinityGroup)
+    {
+        Remove-AzureAffinityGroup -Name $vm.ServiceAffinityGroup
     }
 }
 
@@ -237,6 +263,7 @@ foreach ($vm in $vmInfo)
         }
     }
 }
+
 #Copy VHD blobs
 Write-Host
 Write-Host 'Copying VHD BLOBs from source to destination' -ForegroundColor Green
@@ -279,7 +306,7 @@ While (!($copyComplete))
             $copyComplete = $copyComplete -and $false
         }
     }
-    Start-Sleep -Seconds 10
+    Start-Sleep -Seconds 60
 }
 
 #Create disks based on the VHD Blobs
@@ -297,6 +324,17 @@ ForEach ($vm in $vmInfo)
     }
 }
 
+#Create Affinity Groups
+Write-Host
+Write-Host 'Creating Affinity Groups' -ForegroundColor Green
+foreach ($vm in $vmInfo)
+{
+    If ($vm.ServiceAffinityGroup)
+    {
+        New-AzureAffinityGroup -Name $vm.ServiceAffinityGroup -Location $vm.ServiceAffinityGroupLocation
+    }
+}
+
 #Create Cloud Services
 Write-Host
 Write-Host 'Creating Cloud Services' -ForegroundColor Green
@@ -304,7 +342,14 @@ foreach ($vm in $vmInfo)
 {
     If (!(Get-AzureService -ServiceName $vm.ServiceName -ErrorAction SilentlyContinue))
     {
-        New-AzureService -ServiceName $vm.ServiceName -Location $vm.ServiceLocation
+        If ($vm.ServiceAffinityGroup)
+        {
+            New-AzureService -ServiceName $vm.ServiceName -AffinityGroup $vm.ServiceAffinityGroup
+        }
+        Else
+        {
+            New-AzureService -ServiceName $vm.ServiceName -Location $vm.ServiceLocation
+        }
     }
 }
 
