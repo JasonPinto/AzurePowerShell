@@ -1,6 +1,6 @@
 ﻿####################################################################################################################################
 #                                                                                                                                  #
-#                                                 Migrate-VMs.ps1 Version 1.6                                                      #
+#                                                 Migrate-VMs.ps1 Version 1.7                                                      #
 #                                                                                                                                  #
 # Authored by: Mark Renoden - markreno@microsoft.com                                                                               #
 #                                                                                                                                  #
@@ -14,6 +14,11 @@
 # ***                                                                                                                          *** #
 # ***                                                                                                                          *** #
 # ******************************************************************************************************************************** #
+#                                                                                                                                  #
+# Version 1.7 updates - March 3rd 2015                                                                                             #
+#     - Added validation of user-configured inputs                                                                                 #
+#     - Added option to move cloud services, reserved IP addresses and affinity groups to the same data centre location            #
+#            as the destination storage account                                                                                    #
 #                                                                                                                                  #
 # Version 1.6 updates - March 2nd 2015                                                                                             #
 #     - Added handling for cases where cloud services are using affinity groups instead of locations or vnets                      #
@@ -34,10 +39,8 @@
 #          - Duplication of IP ranges and subnet names/ranges                                                                      #
 #     - ALL VHD BLOBs will be migrated to a container in the destination storage account with the same name as the source          #
 #     - Cloud service names should remain the same -> they will be deleted from the source and recreated in the destination        #
-#          - Note that this also assumes there will be no VMs left behind that are still using the cloud service                   #
 #     - VM names should remain the same  -> they will be deleted from the source and recreated in the destination                  #
 #     - Reserved IP addresses should remain the same -> they will be deleted form the source and recreated in the destination      #
-#     - Datacentre locations for migrated cloud services and reserved IP addresses should remain the same as the source            #
 #                                                                                                                                  #
 # This script does not delete the VHD BLOBs from the source storage account                                                        #
 # There are 6 items that need editing before this script will run for you and these are highlighted with                           #
@@ -51,16 +54,33 @@
 #Define data collection directory
 $outputDir = '<OUTPUT DIRECTORY FOR CAPTURED VM CONFIGURATION>'                                       ####### EDIT THIS!!!!! #######
 Write-Host
-Write-Host 'Output directory is ' -ForegroundColor Green -NoNewline;Write-Host $outputDir -ForegroundColor Cyan
-If (!(Test-Path -Path $outputDir))
+Write-Host 'Output directory is ' -ForegroundColor Green -NoNewline
+Write-Host $outputDir -ForegroundColor Cyan
+If (!(Test-Path -Path $outputDir -IsValid))
 {
-    New-Item -Path $outputDir -ItemType Directory
+    Write-Host $outputDir -ForegroundColor Cyan -NoNewline
+    Write-Host ' is not a valid path syntax. Exiting.' -ForegroundColor Red
+    exit;
+}
+Else
+{
+    If (!(Test-Path -Path $outputDir))
+    {
+        New-Item -Path $outputDir -ItemType Directory
+    }
 }
 
 #Define source subscription
 $sourceSubscriptionName = '<SUBSCRIPTION NAME WHERE VMs CURRENTLY RESIDE>'                            ####### EDIT THIS!!!!! #######
 Write-Host
-Write-Host 'Source subscription is ' -ForegroundColor Green -NoNewline;Write-Host $sourceSubscriptionName -ForegroundColor Cyan
+Write-Host 'Source subscription is ' -ForegroundColor Green -NoNewline
+Write-Host $sourceSubscriptionName -ForegroundColor Cyan
+If (!(Get-AzureSubscription -SubscriptionName $sourceSubscriptionName))
+{
+    Write-Host $sourceSubscriptionName -ForegroundColor Cyan -NoNewline
+    Write-Host ' is not a valid subscription. Exiting.' -ForegroundColor Red
+    exit;
+}
 
 #Define destination subscription and storage account
 $destinationSubscriptionName = '<SUBSCRIPTION NAME WHERE VMs WILL RESIDE AFTER MIGRATION>'            ####### EDIT THIS!!!!! #######
@@ -68,14 +88,39 @@ $destinationStorageAccount = '<STORAGE ACCOUNT NAME WHERE VHD BLOBs WILL RESIDE 
 $destinationStorageAccountLocation = '<DATACENTRE LOCATION FOR DESTINATION STORAGE ACCOUNT>'          ####### EDIT THIS!!!!! #######
 #######       $destinationStorageLocation should have one of the Name values returned by Get-AzureLocation | ft Name         #######
 Write-Host
-Write-Host 'Destination subscription is ' -ForegroundColor Green -NoNewline;Write-Host $destinationSubscriptionName -ForegroundColor Cyan
-Write-Host 'Destination storage account is ' -ForegroundColor Green -NoNewline;Write-Host $destinationStorageAccount -ForegroundColor Cyan
-Write-Host 'Destination storage account location is ' -ForegroundColor Green -NoNewline;Write-Host $destinationStorageAccountLocation -ForegroundColor Cyan
+Write-Host 'Destination subscription is ' -ForegroundColor Green -NoNewline
+Write-Host $destinationSubscriptionName -ForegroundColor Cyan
+If (!(Get-AzureSubscription -SubscriptionName $destinationSubscriptionName))
+{
+    Write-Host $destinationSubscriptionName -ForegroundColor Cyan -NoNewline
+    Write-Host ' is not a valid subscription. Exiting.' -ForegroundColor Red
+    exit;
+}
+$pattern = "^([a-z0-9]{3,24})$"
+Write-Host 'Destination storage account is ' -ForegroundColor Green -NoNewline
+Write-Host $destinationStorageAccount -ForegroundColor Cyan
+If (!($destinationStorageAccount -cmatch $pattern))
+{
+    Write-Host $destinationStorageAccount -ForegroundColor Cyan -NoNewline
+    Write-Host ' is not a valid storage account name.' -ForegroundColor Red
+    Write-Host 'Storage account names must be 3 to 24 lower-case alphanumeric characters. Exiting' -ForegroundColor Red
+    exit;
+}
+Write-Host 'Destination storage account location is ' -ForegroundColor Green -NoNewline
+Write-Host $destinationStorageAccountLocation -ForegroundColor Cyan
+If (!(get-azurelocation | where {$_.Name -eq $destinationStorageAccountLocation}))
+{
+    Write-Host $destinationStorageAccountLocation -ForegroundColor Cyan -NoNewline
+    Write-Host ' is not a valid data centre location.' -ForegroundColor Red
+    Write-Host 'Use Get-AzureLocation to list valid data centre locations. Exiting' -ForegroundColor Red
+    exit;
+}
 
 #Select source subscription
 Select-AzureSubscription -SubscriptionName $sourceSubscriptionName
 Write-Host
-Write-Host 'Selecting source subscription ' -ForegroundColor Green -NoNewline;Write-Host $sourceSubscriptionName -ForegroundColor Cyan
+Write-Host 'Selecting source subscription ' -ForegroundColor Green -NoNewline
+Write-Host $sourceSubscriptionName -ForegroundColor Cyan
 
 #Define an array of VMs that will be excluded from migration
 $excludedVMs = ('vmA','vmB','vmF')                                                                    ####### EDIT THIS!!!!! #######
@@ -95,8 +140,45 @@ foreach ($vm in $vms)
     Write-Host '   '$vm.Name -ForegroundColor Cyan
 }
 
+#Check VMs to be migrated don't belong to a cloud service that houses a VM not being migrated
+foreach ($vm in $vms)
+{
+    $csvms = Get-AzureVM -ServiceName $vm.ServiceName
+    foreach ($csvm in $csvms)
+    {
+        If ($excludedVMs -contains $csvm.Name)
+        {
+            Write-Host
+            Write-Host 'Cloud service ' -ForegroundColor Red -NoNewline
+            Write-Host $vm.ServiceName -ForegroundColor Cyan -NoNewline
+            Write-Host ' hosting VM ' -ForegroundColor Red -NoNewline
+            Write-Host $vm.Name -ForegroundColor Cyan -NoNewline
+            Write-Host ' also contains VM ' -ForegroundColor Red -NoNewline
+            Write-Host $csvm.Name -ForegroundColor Cyan -NoNewline
+            Write-Host '. All VMs residing in the same cloud service must be migrated. Exiting' -ForegroundColor Red -NoNewline
+            exit;
+        }
+    }
+}
+
+#Offer choice to keep data centre locations or to use the destination storage account location
 Write-Host
-Write-Host "If these choices are correct, Press 'y' to continue. " -ForegroundColor Yellow -NoNewline;Write-Host "NOTE: Proceeding will delete deployments from the source subscription!" -ForegroundColor Red
+Write-Host "If you would like cloud services, affinity groups and reserved IP addresses to maintain their data centre location, type " -ForegroundColor Green -NoNewline
+Write-Host "'keep'" -ForegroundColor Yellow -NoNewline
+Write-Host "." -ForegroundColor Green
+Write-Host " Otherwise, these objects will inherit the destination storage group data centre location." -ForegroundColor Green
+If ((Read-Host " ") -ne 'keep')
+{
+    $keep = $false
+}
+Else
+{
+    $keep = $true
+}
+
+Write-Host
+Write-Host "If these choices are correct, Press 'y' to continue. " -ForegroundColor Yellow -NoNewline
+Write-Host "NOTE: Proceeding will delete deployments from the source subscription!" -ForegroundColor Red
 If ((Read-Host " ") -ne 'y')
 {
     exit;
@@ -110,7 +192,8 @@ foreach ($vm in $vms)
     #Export VM config to the output directory
     $exportPath = $outputDir+'\'+$vm.Name+'.xml'
     Write-Host
-    Write-Host 'Exporting VM to ' -ForegroundColor Green -NoNewline;Write-Host $exportPath -ForegroundColor Cyan
+    Write-Host 'Exporting VM to ' -ForegroundColor Green -NoNewline
+    Write-Host $exportPath -ForegroundColor Cyan
     Export-AzureVM -ServiceName $vm.ServiceName -Name $vm.Name -Path $exportPath | Out-Null
     
     #Build object that will store VM information
@@ -119,11 +202,28 @@ foreach ($vm in $vms)
     #Populate VM information
     $info.ExportPath = $exportPath
     $info.ServiceName = $vm.ServiceName
-    $info.ServiceLocation = (Get-AzureService -ServiceName $vm.ServiceName).Location
+    If ($keep)
+    {
+        $info.ServiceLocation = (Get-AzureService -ServiceName $vm.ServiceName).Location
+    }
+    Else
+    {
+        If ((Get-AzureService -ServiceName $vm.ServiceName).Location)
+        {
+            $info.ServiceLocation = $destinationStorageAccountLocation
+        }
+    }
     $info.ServiceAffinityGroup = (Get-AzureService -ServiceName $vm.ServiceName).AffinityGroup
     If ($info.ServiceAffinityGroup)
     {
-        $info.ServiceAffinityGroupLocation = (Get-AzureAffinityGroup -Name $info.ServiceAffinityGroup).Location
+        If ($keep)
+        {
+            $info.ServiceAffinityGroupLocation = (Get-AzureAffinityGroup -Name $info.ServiceAffinityGroup).Location
+        }
+        Else
+        {
+            $info.ServiceAffinityGroupLocation = $destinationStorageAccountLocation
+        }
     }
     $info.InternalLoadBalancers = (Get-AzureInternalLoadBalancer -ServiceName $vm.ServiceName)
     $rIP = (Get-AzureReservedIP | where {$_.ServiceName -eq $vm.ServiceName})
@@ -144,7 +244,8 @@ foreach ($vm in $vms)
 #Write VM Configuration Information to a backup file
 $vmInfo | Export-Clixml -Path $outputDir'\vmInfo.xml'
 Write-Host
-Write-Host 'VM information collected and written to ' -ForegroundColor Green -NoNewline;Write-Host $outputDir'\vmInfo.xml' -ForegroundColor Cyan
+Write-Host 'VM information collected and written to ' -ForegroundColor Green -NoNewline
+Write-Host $outputDir'\vmInfo.xml' -ForegroundColor Cyan
 
 #Shutdown VMs for migration
 Write-Host
@@ -228,11 +329,13 @@ Get-AzureReservedIP | where {$_.ServiceName -eq $null} | Remove-AzureReservedIP 
 #Select destination subscription
 Select-AzureSubscription -SubscriptionName $destinationSubscriptionName
 Write-Host
-Write-Host 'Selecting destination subscription ' -ForegroundColor Green -NoNewline;Write-Host $destinationSubscriptionName -ForegroundColor Cyan
+Write-Host 'Selecting destination subscription ' -ForegroundColor Green -NoNewline
+Write-Host $destinationSubscriptionName -ForegroundColor Cyan
 
 #Create the destination storage account if it doesn't already exist
 Write-Host
-Write-Host 'Ensuring destination storage account exists - ' -ForegroundColor Green -NoNewline;Write-Host $destinationStorageAccount -ForegroundColor Cyan
+Write-Host 'Ensuring destination storage account exists - ' -ForegroundColor Green -NoNewline
+Write-Host $destinationStorageAccount -ForegroundColor Cyan
 If (!(Get-AzureStorageAccount -StorageAccountName $destinationStorageAccount -ErrorAction SilentlyContinue))
 {
     New-AzureStorageAccount -StorageAccountName $destinationStorageAccount -Location $destinationStorageAccountLocation
