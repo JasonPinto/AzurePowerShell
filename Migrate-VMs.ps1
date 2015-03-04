@@ -1,6 +1,6 @@
 ﻿####################################################################################################################################
 #                                                                                                                                  #
-#                                                 Migrate-VMs.ps1 Version 1.7                                                      #
+#                                                 Migrate-VMs.ps1 Version 1.8                                                      #
 #                                                                                                                                  #
 # Authored by: Mark Renoden - markreno@microsoft.com                                                                               #
 #                                                                                                                                  #
@@ -15,8 +15,12 @@
 # ***                                                                                                                          *** #
 # ******************************************************************************************************************************** #
 #                                                                                                                                  #
+# Version 1.8 updates - March 4th 2015                                                                                             #
+#     - Added handling to prevent migration when VMs being migrated reside in an affinity group with VMs not being migrated        #
+#                                                                                                                                  #
 # Version 1.7 updates - March 3rd 2015                                                                                             #
 #     - Added validation of user-configured inputs                                                                                 #
+#     - Added handling to prevent migration when VMs being migrated reside in a cloud service with VMs not being migrated          #
 #     - Added option to move cloud services, reserved IP addresses and affinity groups to the same data centre location            #
 #            as the destination storage account                                                                                    #
 #                                                                                                                                  #
@@ -156,6 +160,31 @@ foreach ($vm in $vms)
             Write-Host ' also contains VM ' -ForegroundColor Red -NoNewline
             Write-Host $csvm.Name -ForegroundColor Cyan -NoNewline
             Write-Host '. All VMs residing in the same cloud service must be migrated. Exiting' -ForegroundColor Red -NoNewline
+            exit;
+        }
+    }
+}
+
+#Check VMs to be migrated don't belong to an affinity group that houses a VM not being migrated
+foreach ($vm in $vms)
+{
+    $ag = (Get-AzureService -ServiceName $vm.ServiceName).AffinityGroup
+    If ($ag)
+    {
+        $agvms = Get-AzureVM | where {(Get-AzureService -ServiceName $_.ServiceName).AffinityGroup -eq $ag}
+    }
+    foreach ($agvm in $agvms)
+    {
+        If ($excludedVMs -contains $agvm.Name)
+        {
+            Write-Host
+            Write-Host 'Affinity Group ' -ForegroundColor Red -NoNewline
+            Write-Host $ag -ForegroundColor Cyan -NoNewline
+            Write-Host ' hosting VM ' -ForegroundColor Red -NoNewline
+            Write-Host $vm.Name -ForegroundColor Cyan -NoNewline
+            Write-Host ' also contains VM ' -ForegroundColor Red -NoNewline
+            Write-Host $agvm.Name -ForegroundColor Cyan -NoNewline
+            Write-Host '. All VMs residing in the affinity group must be migrated. Exiting' -ForegroundColor Red -NoNewline
             exit;
         }
     }
